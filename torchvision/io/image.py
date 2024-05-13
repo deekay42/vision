@@ -200,27 +200,38 @@ def decode_jpeg(
             return torch.ops.image.decode_jpeg(input, mode.value, apply_exif_orientation)
 
 
-def encode_jpeg(input: torch.Tensor, quality: int = 75) -> torch.Tensor:
+def encode_jpeg(
+    input: Union[torch.Tensor, List[torch.Tensor]], quality: int = 75
+) -> Union[torch.Tensor, List[torch.Tensor]]:
     """
-    Takes an input tensor in CHW layout and returns a buffer with the contents
-    of its corresponding JPEG file.
+    Takes a (list of) input tensor(s) in CHW layout and returns a (list of) buffer(s) with the contents
+    of the corresponding JPEG file(s).
 
     Args:
-        input (Tensor[channels, image_height, image_width])): int8 image tensor of
-            ``c`` channels, where ``c`` must be 1 or 3.
-        quality (int): Quality of the resulting JPEG file, it must be a number between
+        input (Tensor[channels, image_height, image_width] or List[Tensor[channels, image_height, image_width]]):
+            (list of) uint8 image tensor(s) of ``c`` channels, where ``c`` must be 1 or 3
+        quality (int): Quality of the resulting JPEG file(s). Must be a number between
             1 and 100. Default: 75
 
     Returns:
-        output (Tensor[1]): A one dimensional int8 tensor that contains the raw bytes of the
-            JPEG file.
+        output (Tensor[1] or list[Tensor[1]]): A (list of) one dimensional uint8 tensor(s) that contain the raw bytes of the JPEG file.
     """
     if not torch.jit.is_scripting() and not torch.jit.is_tracing():
         _log_api_usage_once(encode_jpeg)
     if quality < 1 or quality > 100:
         raise ValueError("Image quality should be a positive number between 1 and 100")
+    if isinstance(input, list):
+        assert len(input) > 0, "encode_jpeg requires at least one input tensor when a list is passed"
+        if input[0].device.type == "cuda":
+            return torch.ops.image.encode_jpeg_cuda(input, quality)
+        else:
+            return [torch.ops.image.encode_jpeg(image, quality) for image in input]
+    else:  # single input tensor
+        if input.device.type == "cuda":
+            return torch.ops.image.encode_jpeg_cuda([input], quality)[0]
+        else:
+            return torch.ops.image.encode_jpeg(input, quality)
 
-    output = torch.ops.image.encode_jpeg(input, quality)
     return output
 
 
