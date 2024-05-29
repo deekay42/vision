@@ -1,34 +1,14 @@
 #pragma once
-
-#include <torch/types.h>
-#include "../image_read_mode.h"
-
 #if NVJPEG_FOUND
+#include <torch/types.h>
 #include <nvjpeg.h>
-#endif
 
 namespace vision {
 namespace image {
-
-C10_EXPORT std::vector<torch::Tensor> decode_jpegs_cuda(
-    const std::vector<torch::Tensor>& encoded_images,
-    vision::image::ImageReadMode mode,
-    torch::Device device);
-
-C10_EXPORT std::vector<torch::Tensor> encode_jpeg_cuda(
-    const std::vector<torch::Tensor>& images,
-    const int64_t quality);
-
-#if NVJPEG_FOUND
-
-extern nvjpegHandle_t nvjpeg_handle;
-extern std::once_flag nvjpeg_handle_creation_flag;
-void nvjpeg_init();
-
-class CUDADecoder {
+class CUDAJpegDecoder {
  public:
-  CUDADecoder();
-  ~CUDADecoder();
+  CUDAJpegDecoder();
+  ~CUDAJpegDecoder();
 
   std::vector<torch::Tensor> decode_images(
       const std::vector<torch::Tensor>& encoded_images,
@@ -53,8 +33,7 @@ class CUDADecoder {
   nvjpegDecodeParams_t nvjpeg_decode_params;
   nvjpegJpegDecoder_t nvjpeg_decoder;
   bool hw_decode_available{true};
+  nvjpegHandle_t nvjpeg_handle;
 };
+}}
 #endif
-
-} // namespace image
-} // namespace vision
