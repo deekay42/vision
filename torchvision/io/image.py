@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import List, Union
 from warnings import warn
 
 import torch
@@ -68,7 +69,9 @@ def write_file(filename: str, data: torch.Tensor) -> None:
 
 
 def decode_png(
-    input: torch.Tensor, mode: ImageReadMode = ImageReadMode.UNCHANGED, apply_exif_orientation: bool = False
+    input: torch.Tensor,
+    mode: ImageReadMode = ImageReadMode.UNCHANGED,
+    apply_exif_orientation: bool = False,
 ) -> torch.Tensor:
     """
     Decodes a PNG image into a 3 dimensional RGB or grayscale Tensor.
@@ -134,22 +137,26 @@ def write_png(input: torch.Tensor, filename: str, compression_level: int = 6):
 
 
 def decode_jpeg(
-    input: torch.Tensor,
+    input: Union[torch.Tensor, List[torch.Tensor]],
     mode: ImageReadMode = ImageReadMode.UNCHANGED,
     device: str = "cpu",
     apply_exif_orientation: bool = False,
-) -> torch.Tensor:
+) -> Union[torch.Tensor, List[torch.Tensor]]:
     """
-    Decodes a JPEG image into a 3 dimensional RGB or grayscale Tensor.
-    Optionally converts the image to the desired format.
-    The values of the output tensor are uint8 between 0 and 255.
+    Decodes a (list of) JPEG image(s) into a (list of) 3 dimensional RGB or grayscale Tensor(s).
+    Optionally converts the image(s) to the desired format.
+    The values of the output tensor(s) are uint8 between 0 and 255.
+
+    .. note::
+        When using a CUDA device, passing a list of tensors is more efficient than repeated individual calls to ``decode_jpeg``.
+        When using CPU the performance is equivalent.
 
     Args:
-        input (Tensor[1]): a one dimensional uint8 tensor containing
-            the raw bytes of the JPEG image. This tensor must be on CPU,
+        input (Tensor[1] or list[Tensor[1]]): a (list of) one dimensional uint8 tensor(s) containing
+            the raw bytes of the JPEG image. This tensor(s) must be on CPU,
             regardless of the ``device`` parameter.
         mode (ImageReadMode): the read mode used for optionally
-            converting the image. The supported modes are: ``ImageReadMode.UNCHANGED``,
+            converting the image(s). The supported modes are: ``ImageReadMode.UNCHANGED``,
             ``ImageReadMode.GRAY`` and ``ImageReadMode.RGB``
             Default: ``ImageReadMode.UNCHANGED``.
             See ``ImageReadMode`` class for more information on various
@@ -173,35 +180,62 @@ def decode_jpeg(
     if not torch.jit.is_scripting() and not torch.jit.is_tracing():
         _log_api_usage_once(decode_jpeg)
     device = torch.device(device)
-    if device.type == "cuda":
-        output = torch.ops.image.decode_jpeg_cuda(input, mode.value, device)
-    else:
-        output = torch.ops.image.decode_jpeg(input, mode.value, apply_exif_orientation)
-    return output
+
+    if isinstance(input, list):
+        if len(input) == 0:
+            raise RuntimeError("Input list must contain at least one element")
+        if input[0].device.type != "cpu":
+            raise RuntimeError("Input list must contain tensors on CPU")
+        if device.type == "cuda":
+            return torch.ops.image.decode_jpegs_cuda(input, mode.value, device)
+        else:
+            return [torch.ops.image.decode_jpeg(img, mode.value, apply_exif_orientation) for img in input]
+
+    else:  # input is tensor
+        if input.device.type != "cpu":
+            raise RuntimeError("Input tensor must be a CPU tensor")
+        if device.type == "cuda":
+            return torch.ops.image.decode_jpegs_cuda([input], mode.value, device)[0]
+        else:
+            return torch.ops.image.decode_jpeg(input, mode.value, apply_exif_orientation)
 
 
-def encode_jpeg(input: torch.Tensor, quality: int = 75) -> torch.Tensor:
+def encode_jpeg(
+    input: Union[torch.Tensor, List[torch.Tensor]], quality: int = 75
+) -> Union[torch.Tensor, List[torch.Tensor]]:
     """
-    Takes an input tensor in CHW layout and returns a buffer with the contents
-    of its corresponding JPEG file.
+    Takes a (list of) input tensor(s) in CHW layout and returns a (list of) buffer(s) with the contents
+    of the corresponding JPEG file(s).
+
+    .. note::
+        Passing a list of CUDA tensors is more efficient than repeated individual calls to ``encode_jpeg``.
+        For CPU tensors the performance is equivalent.
 
     Args:
-        input (Tensor[channels, image_height, image_width])): int8 image tensor of
-            ``c`` channels, where ``c`` must be 1 or 3.
-        quality (int): Quality of the resulting JPEG file, it must be a number between
+        input (Tensor[channels, image_height, image_width] or List[Tensor[channels, image_height, image_width]]):
+            (list of) uint8 image tensor(s) of ``c`` channels, where ``c`` must be 1 or 3
+        quality (int): Quality of the resulting JPEG file(s). Must be a number between
             1 and 100. Default: 75
 
     Returns:
-        output (Tensor[1]): A one dimensional int8 tensor that contains the raw bytes of the
-            JPEG file.
+        output (Tensor[1] or list[Tensor[1]]): A (list of) one dimensional uint8 tensor(s) that contain the raw bytes of the JPEG file.
     """
     if not torch.jit.is_scripting() and not torch.jit.is_tracing():
         _log_api_usage_once(encode_jpeg)
     if quality < 1 or quality > 100:
         raise ValueError("Image quality should be a positive number between 1 and 100")
-
-    output = torch.ops.image.encode_jpeg(input, quality)
-    return output
+    if isinstance(input, list):
+        if not input:
+            raise ValueError("encode_jpeg requires at least one input tensor when a list is passed")
+        if input[0].device.type == "cuda":
+            return torch.ops.image.encode_jpegs_cuda(input, quality)
+        else:
+            return [torch.ops.image.encode_jpeg(image, quality) for image in input]
+    else:  # single input tensor
+        if input.device.type == "cuda":
+            return torch.ops.image.encode_jpegs_cuda([input], quality)[0]
+        else:
+            return torch.ops.image.encode_jpeg(input, quality)
 
 
 def write_jpeg(input: torch.Tensor, filename: str, quality: int = 75):
@@ -218,11 +252,14 @@ def write_jpeg(input: torch.Tensor, filename: str, quality: int = 75):
     if not torch.jit.is_scripting() and not torch.jit.is_tracing():
         _log_api_usage_once(write_jpeg)
     output = encode_jpeg(input, quality)
+    assert isinstance(output, torch.Tensor)
     write_file(filename, output)
 
 
 def decode_image(
-    input: torch.Tensor, mode: ImageReadMode = ImageReadMode.UNCHANGED, apply_exif_orientation: bool = False
+    input: torch.Tensor,
+    mode: ImageReadMode = ImageReadMode.UNCHANGED,
+    apply_exif_orientation: bool = False,
 ) -> torch.Tensor:
     """
     Detects whether an image is a JPEG or PNG and performs the appropriate
@@ -251,7 +288,9 @@ def decode_image(
 
 
 def read_image(
-    path: str, mode: ImageReadMode = ImageReadMode.UNCHANGED, apply_exif_orientation: bool = False
+    path: str,
+    mode: ImageReadMode = ImageReadMode.UNCHANGED,
+    apply_exif_orientation: bool = False,
 ) -> torch.Tensor:
     """
     Reads a JPEG or PNG image into a 3 dimensional RGB or grayscale Tensor.
