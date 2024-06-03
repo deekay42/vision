@@ -432,8 +432,9 @@ def test_decode_jpegs(mode, scripted, device):
     # test multithreaded decoding
     # in the current version we prevent this by using a lock but we still want to test it
     num_workers = 10
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(decode_fn, encoded_images, mode, "cuda") for _ in range(num_workers)]
+        futures = [executor.submit(decode_fn, encoded_images, mode, device) for _ in range(num_workers)]
     decoded_images_threaded = [future.result() for future in futures]
     assert len(decoded_images_threaded) == num_workers
     for decoded_images in decoded_images_threaded:
@@ -451,24 +452,6 @@ def test_decode_image_cuda_raises():
         decode_image(data)
 
 
-@needs_cuda
-def test_decode_jpeg_cuda_device_param():
-    """Make sure we can pass a string or a torch.device as device param"""
-    path = next(path for path in get_images(IMAGE_ROOT, ".jpg") if "cmyk" not in path)
-    data = read_file(path)
-    current_device = torch.cuda.current_device()
-    current_stream = torch.cuda.current_stream()
-    num_devices = torch.cuda.device_count()
-    devices = ["cuda", torch.device("cuda")] + [torch.device(f"cuda:{i}") for i in range(num_devices)]
-    results = []
-    for device in devices:
-        print(device)
-        results.append(decode_jpeg(data, device=device))
-    assert len(results) > 0
-    for result in results:
-        assert torch.all(result.cpu() == results[0].cpu())
-    assert current_device == torch.cuda.current_device()
-    assert current_stream == torch.cuda.current_stream()
 
 @needs_cuda
 def test_decode_jpeg_cuda_errors():
@@ -592,25 +575,28 @@ def test_batch_encode_jpegs(scripted, contiguous):
 
 
 @needs_cuda
-def test_encode_jpeg_cuda_device_param():
-    """
-    Make sure that using different devices always results in the same outputs
-    """
-    print("starting test now helllo!!?!")
+@pytest.mark.parametrize("fn", ("decode", "encode"))
+def test_decode_jpeg_cuda_device_param(fn):
+    """Make sure we can pass a string or a torch.device as device param"""
     path = next(path for path in get_images(IMAGE_ROOT, ".jpg") if "cmyk" not in path)
-    decoded_image = read_image(path)
 
+    data = read_file(path) if fn == "encode" else read_image(path)
+
+    current_device = torch.cuda.current_device()
+    current_stream = torch.cuda.current_stream()
     num_devices = torch.cuda.device_count()
     devices = ["cuda", torch.device("cuda")] + [torch.device(f"cuda:{i}") for i in range(num_devices)]
-    print(devices)
     results = []
-
     for device in devices:
-        results.append(encode_jpeg(decoded_image.to(device=device)))
+        if fn == "encode":
+            results.append(encode_jpeg(data.to(device=device)))
+        else:
+            results.append(decode_jpeg(data, device=device))
     assert len(results) == len(devices)
     for result in results:
-        print(device)
         assert torch.all(result.cpu() == results[0].cpu())
+    assert current_device == torch.cuda.current_device()
+    assert current_stream == torch.cuda.current_stream()
 
 @needs_cuda
 @pytest.mark.parametrize(

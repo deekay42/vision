@@ -5,18 +5,22 @@
 
 #if NVJPEG_FOUND
 #include <nvjpeg.h>
+#include <c10/cuda/CUDAStream.h>
 
 namespace vision {
 namespace image {
 class CUDAJpegDecoder {
  public:
-  CUDAJpegDecoder();
+  CUDAJpegDecoder(const torch::Device& target_device);
   ~CUDAJpegDecoder();
 
   std::vector<torch::Tensor> decode_images(
       const std::vector<torch::Tensor>& encoded_images,
-      const nvjpegOutputFormat_t& output_format,
-      const torch::Device& device);
+      const nvjpegOutputFormat_t& output_format);
+
+  const torch::Device original_device;
+  const torch::Device target_device;
+  const c10::cuda::CUDAStream stream;
 
  protected:
   std::tuple<
@@ -25,10 +29,8 @@ class CUDAJpegDecoder {
       std::vector<int>>
   prepare_buffers(
       const std::vector<torch::Tensor>& encoded_images,
-      const nvjpegOutputFormat_t& output_format,
-      const torch::Device& device);
+      const nvjpegOutputFormat_t& output_format);
   nvjpegJpegState_t nvjpeg_state;
-  cudaStream_t stream;
   nvjpegJpegState_t nvjpeg_decoupled_state;
   nvjpegBufferPinned_t pinned_buffers[2];
   nvjpegBufferDevice_t device_buffer;

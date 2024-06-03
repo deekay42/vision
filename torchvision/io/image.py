@@ -139,7 +139,7 @@ def write_png(input: torch.Tensor, filename: str, compression_level: int = 6):
 def decode_jpeg(
     input: Union[torch.Tensor, List[torch.Tensor]],
     mode: ImageReadMode = ImageReadMode.UNCHANGED,
-    device: str = "cpu",
+    device: Union[str, torch.device] = "cpu",
     apply_exif_orientation: bool = False,
 ) -> Union[torch.Tensor, List[torch.Tensor]]:
     """
@@ -179,7 +179,11 @@ def decode_jpeg(
     """
     if not torch.jit.is_scripting() and not torch.jit.is_tracing():
         _log_api_usage_once(decode_jpeg)
-    device = torch.device(device)
+    if isinstance(device, str):
+        device = torch.device(device) 
+
+
+    print(f"device: {device}")
 
     if isinstance(input, list):
         if len(input) == 0:

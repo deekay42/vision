@@ -13,9 +13,7 @@ class CUDAJpegEncoder {
   CUDAJpegEncoder(const torch::Device& device);
   ~CUDAJpegEncoder();
 
-  torch::Tensor encode_jpeg(
-      const torch::Tensor& src_image,
-      const torch::Device& device);
+  torch::Tensor encode_jpeg(const torch::Tensor& src_image);
 
   void setQuality(const int64_t);
 
@@ -24,7 +22,6 @@ class CUDAJpegEncoder {
   const c10::cuda::CUDAStream stream;
 
  protected:
-  // dedicated stream to avoid interfering with calling code stream(s)
   nvjpegEncoderState_t nv_enc_state;
   nvjpegEncoderParams_t nv_enc_params;
   nvjpegHandle_t nvjpeg_handle;

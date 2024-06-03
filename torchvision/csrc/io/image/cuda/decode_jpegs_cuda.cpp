@@ -12,6 +12,7 @@ std::vector<torch::Tensor> decode_jpegs_cuda(
 #else
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime_api.h>
 #include <algorithm>
@@ -21,33 +22,27 @@ std::vector<torch::Tensor> decode_jpegs_cuda(
 #include <mutex>
 #include <sstream>
 #include <string>
-
+#include <typeinfo>
 namespace vision {
 namespace image {
 
 std::mutex decoderMutex;
 std::unique_ptr<CUDAJpegDecoder> cudaJpegDecoder;
-torch::Device activeDecoderDevice(torch::kCPU);
 
 std::vector<torch::Tensor> decode_jpegs_cuda(
     const std::vector<torch::Tensor>& encoded_images,
     vision::image::ImageReadMode mode,
     torch::Device device) {
   C10_LOG_API_USAGE_ONCE(
-      "torchvision.csrc.io.image.cuda.nvjpeg.decode_jpegs_cuda");
+      "torchvision.csrc.io.image.cuda.decode_jpegs_cuda.decode_jpegs_cuda");
 
-  // some nvjpeg structures are not thread safe so we're keeping it single
-  // threaded for now. in the future this may be an opportunity to unlock
-  // further speedups
-  std::lock_guard<std::mutex> lock(decoderMutex);
-  at::cuda::CUDAGuard device_guard(device);
+  std::lock_guard<std::mutex> lock(decoderMutex);  
 
-  // lazy init of the decoder class
-  // the decoder holds on to a lot of state and is expensive to create, so we
-  // reuse it across calls
-  if (cudaJpegDecoder == nullptr || device != activeDecoderDevice) {
-    cudaJpegDecoder = std::make_unique<CUDAJpegDecoder>();
-    activeDecoderDevice = device;
+  if (cudaJpegDecoder == nullptr || device != cudaJpegDecoder->target_device) {
+    if (cudaJpegDecoder != nullptr)
+      delete cudaJpegDecoder.release();
+    cudaJpegDecoder = std::make_unique<CUDAJpegDecoder>(device);
+    std::atexit([]() { delete cudaJpegDecoder.release(); });
   }
 
   for (auto& encoded_image : encoded_images) {
@@ -108,8 +103,16 @@ std::vector<torch::Tensor> decode_jpegs_cuda(
   }
 
   try {
-    return cudaJpegDecoder->decode_images(
-        encoded_images, output_format, device);
+    at::cuda::CUDAEvent event;
+    event.record(cudaJpegDecoder->stream);
+    auto result =
+        cudaJpegDecoder->decode_images(encoded_images, output_format);
+    if(device.has_index())
+        event.block(at::cuda::getCurrentCUDAStream(
+            cudaJpegDecoder->original_device.index()));
+    else
+        event.block(at::cuda::getCurrentCUDAStream());
+    return result;
   } catch (const std::exception& e) {
     if (typeid(e) != typeid(std::runtime_error)) {
       TORCH_CHECK(false, "Error while decoding JPEG images: ", e.what());
@@ -119,14 +122,13 @@ std::vector<torch::Tensor> decode_jpegs_cuda(
   }
 }
 
-CUDAJpegDecoder::CUDAJpegDecoder() {
-  /*
-    Many of nvjpeg's status variables can be reused across calls,
-    so we initialize them here and save them as class members
-  */
-
+CUDAJpegDecoder::CUDAJpegDecoder(const torch::Device& target_device)
+    : original_device{torch::kCUDA, torch::cuda::current_device()},
+      target_device{target_device},
+      stream{target_device.has_index() ? at::cuda::getStreamFromPool(false, target_device.index()) : at::cuda::getStreamFromPool(false)} {
   nvjpegStatus_t status;
-  cudaError_t cudaStatus;
+
+  torch::cuda::set_device(target_device.has_index() ? target_device.index() : 0);
 
   status = nvjpegCreateEx(
       NVJPEG_BACKEND_HARDWARE,
@@ -208,10 +210,6 @@ CUDAJpegDecoder::CUDAJpegDecoder() {
       status == NVJPEG_STATUS_SUCCESS,
       "Failed to create decode params: ",
       status);
-
-  cudaStatus = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-  TORCH_CHECK(
-      cudaStatus == cudaSuccess, "Failed to create CUDA stream: ", cudaStatus);
 }
 
 CUDAJpegDecoder::~CUDAJpegDecoder() {
@@ -289,6 +287,7 @@ CUDAJpegDecoder::~CUDAJpegDecoder() {
       destroy_status == NVJPEG_STATUS_SUCCESS,
       "nvjpegDestroy failed: ",
       destroy_status);
+  torch::cuda::set_device(original_device.index());
 }
 
 std::tuple<
@@ -297,8 +296,7 @@ std::tuple<
     std::vector<int>>
 CUDAJpegDecoder::prepare_buffers(
     const std::vector<torch::Tensor>& encoded_images,
-    const nvjpegOutputFormat_t& output_format,
-    const torch::Device& device) {
+    const nvjpegOutputFormat_t& output_format) {
   /*
     This function scans the encoded images' jpeg headers and
     allocates decoding buffers based on the metadata found
@@ -362,7 +360,7 @@ CUDAJpegDecoder::prepare_buffers(
     // reserve output buffer
     auto output_tensor = torch::empty(
         {int64_t(output_channels), int64_t(height[0]), int64_t(width[0])},
-        torch::dtype(torch::kU8).device(device));
+        torch::dtype(torch::kU8).device(target_device));
     output_tensors[i] = output_tensor;
 
     // fill nvjpegImage_t struct
@@ -380,8 +378,7 @@ CUDAJpegDecoder::prepare_buffers(
 
 std::vector<torch::Tensor> CUDAJpegDecoder::decode_images(
     const std::vector<torch::Tensor>& encoded_images,
-    const nvjpegOutputFormat_t& output_format,
-    const torch::Device& device) {
+    const nvjpegOutputFormat_t& output_format) {
   /*
     This function decodes a batch of jpeg bitstreams.
     We scan all encoded bitstreams and sort them into two groups:
@@ -401,7 +398,7 @@ std::vector<torch::Tensor> CUDAJpegDecoder::decode_images(
   */
 
   auto [decoded_imgs_buf, output_tensors, channels] =
-      prepare_buffers(encoded_images, output_format, device);
+      prepare_buffers(encoded_images, output_format);
 
   nvjpegStatus_t status;
   cudaError_t cudaStatus;
